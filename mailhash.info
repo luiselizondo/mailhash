@@ -1,0 +1,4 @@
+core = "6.x"
+name = "Mail Hash"
+description = "Creates token that are used to redirect a user to another location in a safe and consisten way".
+project = "mailtoken"

@@ -1,0 +1,220 @@
+<?php
+
+/***
+ * START API **********
+ */
+/**
+ * Create a hash that you can use in a mail that contains the redirection
+ * 
+ * @param $uid 
+ * the user uid for who this redirect applies
+ * 
+ * @param $redirect
+ * the path redirection that needs to take place
+ */
+function mailhash_create($uid, $redirect) {
+  $hash = mailhash_generate($uid, $redirect);
+  return url("track", array('absolute' => TRUE, 'query' => $hash, 'purl' => array('disabled' => TRUE)));
+}
+
+/**
+ * Destroy a hash by disabling in the database the hash and remove it from the session
+ */
+function mailhash_destroy() {
+  $hash = mailhash_session();
+  if(isset($hash)) {
+    db_query("UPDATE {mailhash} SET status = 1 WHERE hash = '%s'", $hash);
+    unset($_SESSION['mailhash']);
+  }
+}
+
+/***
+ * END API **********
+ */
+
+/**
+ * Implements hook_menu
+ */
+function mailhash_menu() {
+  // Implement a simple callback
+  // This path will be used to redirect given a hash and then know what to do with it
+  $items["track"] = array(
+    'type' => MENU_CALLBACK,
+    'access callback' => TRUE,
+    'page callback' => "mailhash_track"
+  );
+  
+  return $items;
+}
+
+/**
+ * Implements hook_cron
+ */
+function mailhash_cron() {
+  mailhash_delete();
+}
+
+/*
+ * Generate a hash, insert the mailhash object into the database and return the hash to use
+ * Don't use this function unless you know what you're doing, please use mailhash()
+ * 
+ * @param $uid
+ * 
+ * @param $redirect
+ * 
+ * @return string the hash to use to attach to the path "track"
+ */ 
+function mailhash_generate($uid, $redirect) {
+  $timestamp = time();
+  $hash = _mailhash_hash_create($uid, $timestamp, $redirect);
+  
+  $mailhash = new stdClass();
+  $mailhash->hash = $hash;
+  $mailhash->uid = $uid;
+  $mailhash->created = $timestamp;
+  $mailhash->redirect = $redirect;
+  $mailhash->status = 0;
+  
+  mailhash_insert($mailhash);
+  
+  return $hash;
+}
+
+/**
+ * Create a simple string hash
+ * don't use this directly, use mailhash_generate() instead
+ * this function will not insert anything into the database
+ * and if the hash is not in the database then it has no use
+ * 
+ * mailhash_generate() will take care of inserting the record
+ */
+function _mailhash_hash_create($uid, $timestamp, $redirect) {
+  return md5($timestamp . $uid . $redirect);
+}
+
+/**
+ * Insert hash into the db
+ */
+function mailhash_insert($mailhash) {
+  drupal_write_record("mailhash", $mailhash);
+}
+
+/**
+ * Return the hash saved in $_SESSION
+ */
+function mailhash_session() {
+  if(isset($_SESSION['mailhash'])) {
+    return $_SESSION['mailhash'];
+  }
+}
+
+/**
+ * Get all expired hashs and delete them, used in garbage recollector
+ * There are two reasons to expire:
+ * 
+ * Case 1: The hash status is 1 (it was used before)
+ * Case 2: The hash has expired, it has more than 24 hours and it hasn't been used
+ */
+function mailhash_delete() {
+  // Create a list of hashs that met one or both criteria and then send them throught
+  // mailhash_delete() so they're removed from the face of the earth
+  
+  // Case where the status = 1, we delete all this fellas instead of going thought a loop
+  // that will be more expensive
+  db_query("DELETE FROM {mailhash} WHERE status = 1");
+  
+  // Case where the status = 0 but the hash has expired
+  $current_time = time();
+  $time = $current_time + variable_get("mailhash_expire", "86400"); // 24 hours by default, use 172800 for 48 hours
+  db_query("DELETE FROM {mailhash} WHERE created < %d", $time);
+}
+
+/**
+ * Get a mailhash from the db
+ * 
+ * @param $hash string the hash to get
+ * 
+ * @return array containing the object
+ */
+function mailhash_get($hash) {
+  $result = db_fetch_object(db_query("SELECT * FROM {mailhash} WHERE hash = '%s'", $hash));
+  
+  return $result;
+}
+
+
+/**
+ * Disable the cache for the track path
+ */
+function mailhash_init() {
+  if ($_GET['q'] == "track") {
+    $GLOBALS['conf']['cache'] = 0;
+  }
+}
+
+function mailhash_url($path = NULL) {
+  if(isset($path)) {
+    $path = parse_url($path);
+    $hash = $path['query'];
+  }
+  else {
+    $path = parse_url($_SERVER['REQUEST_URI']);
+    $hash = $path['query'];  
+  }
+  
+  return $hash;
+}
+
+/**
+ * Page callback to know what to do with a hash
+ */
+function mailhash_track() {
+
+  $path = parse_url($_SERVER['REQUEST_URI']);
+  $hash = $path['query'];
+  $mailhash = mailhash_get($hash);
+  // get the mailhash object from the db AND CHECK THAT EXISTS
+  if($mailhash->status == 0) {
+    // Check if the user is logged in
+    if(user_is_anonymous()) {      
+      if($mailhash->uid == 0) {
+        // This is not a registered user so redirect to the user/register instead
+        $_SESSION['mailhash'] = $mailhash->hash;
+        drupal_goto("user/register", "destination=" . urlencode($mailhash->redirect));
+      }
+      else {
+        // Load the destination user, if it doesn't exist then we need to redirect to the user/register path
+        // $account = user_load($mailhash->uid);
+        // Redirect to the user/login page and add the hash, mailhash_user will know what to do with it OR set the destination from here
+        // try both
+        $_SESSION['mailhash'] = $mailhash->hash;
+        drupal_goto("user/login", "destination=" . urlencode($mailhash->redirect));
+      }    
+    }
+    else {
+      // redirect inmediately to the redirect path
+      global $user;
+      if($mailhash->uid == $user->uid) {
+        // This hash is meant for you, do all the crazy stuff
+        drupal_goto(urlencode($mailhash->redirect));
+      }
+      else {
+        // This hash was not meant for you
+        drupal_set_message("There was a problem with your request, most likely the path you used was not for you.");
+      }
+    }    
+  }
+  
+  return t("We're sorry, that hash has been used before or is invalid");
+  
+}
+
+/**
+ * Implements hook_user
+ */
+function mailhash_user($op, &$edit, &$account, $category = NULL) {
+  if($op == "login") {
+    // Take the hash in the query and check where to redirect
+    // Check if there is a hash that does not correspond to the user and remove if necessary
+  }
+}
